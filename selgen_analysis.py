@@ -9,162 +9,82 @@ import sys
 import os
 
 
-def crop_ROI(image):
-    # crop_ROI function localize region of interest = black tray with crop .
-    # Localization is based on gradient between white background and black borders of tray
+def crop_roi(img: np.ndarray, threshold: int = 150):
+    """
+    Localizes region of interest = black tray with crop based on gradient
+    between white background and black borders of tray
+    :param img:
+    :param threshold:
+    """
 
-    assert (type(image) == np.ndarray) & (len(image.shape) == 3) & np.amin(image) >= 0 & np.amax(
-        image) <= 255, 'Input data has to be RGB image'
+    assert type(img) == np.ndarray and len(img.shape) == 3 and img.dtype == "uint8", "Input data has wrong data type"
 
-    try:
+    b, g, r = cv2.split(img)
 
-        b, g, r = cv2.split(image)
+    # columns
+    col_mask = b < threshold
+    col_mask[:, col_mask.shape[1] // 2 - 500:col_mask.shape[1] // 2 + 500] = 1
 
-        # columns
-        col_mask = b < 150
-        col_mask[:, col_mask.shape[1] // 2 - 500:col_mask.shape[1] // 2 + 500] = 1
+    proj = np.sum(col_mask, axis=0)
+    mez = max(proj) / 3
 
-        proj = np.sum(col_mask, axis=0)
-        mez = max(proj) / 3
+    pos = round(len(proj) / 2)
 
-        pos = round(len(proj) / 2)
+    while proj[pos] > mez:
+        pos = pos + 1
 
-        while proj[pos] > mez:
-            pos = pos + 1
+    dos = pos
 
-        dos = pos
+    pos = round(len(proj) / 2)
 
-        pos = round(len(proj) / 2)
+    while proj[pos] > mez:
+        pos = pos - 1
 
-        while proj[pos] > mez:
-            pos = pos - 1
+    ods = pos
 
-        ods = pos
+    # rows
+    row_mask = b < threshold
 
-        # rows
+    proj = np.sum(row_mask, axis=1)
+    mez = max(proj) / 3
+    pos = round(len(proj) / 2)
 
-        row_mask = b < 150
+    while proj[pos] > mez:
+        pos = pos + 1
 
-        proj = np.sum(row_mask, axis=1)
-        mez = max(proj) / 3
-        pos = round(len(proj) / 2)
+    dor = pos
 
-        while proj[pos] > mez:
-            pos = pos + 1
+    pos = round(len(proj) / 2)
 
-        dor = pos
+    while proj[pos] > mez:
+        pos = pos - 1
 
-        pos = round(len(proj) / 2)
+    odr = pos
 
-        while proj[pos] > mez:
-            pos = pos - 1
+    ROI = img[odr:dor, ods:dos, :]
 
-        odr = pos
-
-        ROI = image[odr:dor, ods:dos, :]
-
-        return ROI
-
-    except Exception as e:
-
-        raise e
-
-
-def half_split(image):
-    # half_split function separate left and right part of tray.
-    # This step of analysis can be potentionally problematic, with changing light conditions.
-
-    assert (type(image) == np.ndarray) & (len(image.shape) == 3) & np.amin(image) >= 0 & np.amax(
-        image) <= 255, 'Input data has to be RGB image'
-
-    try:
-
-        hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-        h, w = hsv.shape[0:2]
-
-        lower = np.array([0, 0, 20])
-        upper = np.array([250, 100, 150])
-
-        mask = cv2.inRange(hsv, lower, upper)
-        mask = (mask == 0).astype('uint8')
-
-        mask[0:200, :] = 0
-        mask[h - 200:h, :] = 0
-        mask[:, 0:1200] = 1
-        mask[:, w - 1200:w] = 1
-
-        mask = (mask > 0).astype('uint8')
-        proj = np.sum(mask, axis=0)
-        index = np.round(np.mean(np.argpartition(proj, 30)[:30]), -1).astype('uint16')
-
-        left = image[:, 0:index, :]
-        right = image[:, index:image.shape[1], :]
-
-        return left, right, index
-
-    except Exception as e:
-
-        raise e
-
-
-def find_grid_mask(roi):
-    assert (type(roi) == np.ndarray) & (len(roi.shape) == 3) & np.amin(roi) >= 0 & np.amax(
-        roi) <= 255, 'Input data has to be RGB image'
-
-    h, w = roi.shape[:2]
-
-    (cX, cY) = (w // 2, h // 2)
-
-    opt_angle = find_opt_rotation(roi)
-
-    M = cv2.getRotationMatrix2D((cX, cY), opt_angle, 1.0)
-    roi = cv2.warpAffine(roi, M, (w, h))
-
-    return roi
+    return ROI
 
 
 def find_opt_rotation(mask: np.ndarray):
     (h, w) = mask.shape[:2]
     (cX, cY) = (w // 2, h // 2)
 
-    Crit = []
-    Angle = []
+    crit = []
+    angle = []
 
-    for angle in np.arange(-20, 21):
-        M = cv2.getRotationMatrix2D((cX, cY), angle, 1.0)
+    for a in np.arange(-20, 21):
+        M = cv2.getRotationMatrix2D((cX, cY), a, 1.0)
         rotated = cv2.warpAffine(mask, M, (w, h))
 
-        Crit.append(np.var(np.sum(rotated, axis=1)) + np.var(np.sum(rotated, axis=1)))
-        Angle.append(angle)
+        crit.append(np.var(np.sum(rotated, axis=1)) + np.var(np.sum(rotated, axis=1)))
+        angle.append(a)
 
-    return Angle[np.argmax(Crit)]
-
-
-def nufit_fourier(x, y):
-    '''Fit sin to the input time sequence, and return fitting parameters "amp", "omega", "phase", "offset", "freq",
-    "period" and "fitfunc" '''
-
-    x = np.array(x)
-    y = np.array(y)
-
-    freq = np.fft.fftfreq(len(x), (x[1] - x[0]))  # assume uniform spacing
-    Fy = abs(np.fft.fft(y))
-
-    guess_freq = abs(freq[np.argmax(Fy[1:]) + 1])  # excluding the zero frequency "peak", which is related to offset
-    guess_amp = np.std(y) * 2. ** 0.5
-    guess_offset = np.mean(y)
-    guess = np.array([guess_amp, 2. * np.pi * guess_freq, 0., guess_offset])
-
-    def sinfunc(t, A, w, p, c):  return A * np.sin(w * t + p) + c
-
-    popt, pcov = curve_fit(sinfunc, x, y, p0=guess, maxfev=10000)
-    A, w, p, c = popt
-    fitfunc = lambda t: A * np.sin(w * t + p) + c
-
-    return fitfunc(x)
+    return angle[np.argmax(crit)]
 
 
 def find_splits(signal, COUNT):
+    # TODO simplify
     def square_function(xo, frequency, duty, offset):
         xo = xo + offset
         period = len(signal) / frequency
@@ -199,18 +119,44 @@ def find_splits(signal, COUNT):
         if peak >= len(signal) - 1:
             peaks_n[n] = len(signal) - 1
 
+    # freq = np.fft.fftfreq(len(x), (x[1] - x[0]))  # assume uniform spacing
+    # Fy = abs(np.fft.fft(y))
+    #
+    # guess_freq = abs(freq[np.argmax(Fy[1:]) + 1])  # excluding the zero frequency "peak", which is related to offset
+    # guess_amp = np.std(y) * 2. ** 0.5
+    # guess_offset = np.mean(y)
+    # guess = np.array([guess_amp, 2. * np.pi * guess_freq, 0., guess_offset])
+    #
+    # def sinfunc(t, A, w, p, c):
+    #     return A * np.sin(w * t + p) + c
+    #
+    # popt, pcov = curve_fit(sinfunc, x, y, p0=guess, maxfev=10000)
+    # A, w, p, c = popt
+    # fitfunc = lambda t: A * np.sin(w * t + p) + c
+    #
+    # return fitfunc(x)
+
     return peaks_n
 
 
-def get_grid_coords(grid_mask):
-    # get_grid_coords identify coordinates of grid on given part of tray with grid mask
+def get_grid_coords(img: np.ndarray):
+    """
+    Identifies coordinates of grid on given part of tray with grid mask
+    """
 
-    assert (type(grid_mask) == np.ndarray) & (len(grid_mask.shape) == 2) & np.amin(grid_mask) >= 0 & np.amax(
-        grid_mask) <= 255, 'Input data has to be RGB image'
+    assert type(img) == np.ndarray and len(img.shape) == 3 and img.dtype == "uint8", "Input data has wrong data type"
+
+    h, w = img.shape[:2]
+    (cX, cY) = (w // 2, h // 2)
+
+    opt_angle = find_opt_rotation(img)
+
+    M = cv2.getRotationMatrix2D((cX, cY), opt_angle, 1.0)
+    img = cv2.cvtColor(cv2.warpAffine(img, M, (w, h)), cv2.COLOR_BGR2GRAY)
 
     # Compute signal for rows and columns
-    row_signal = np.sum(grid_mask, axis=1)
-    col_signal = np.sum(grid_mask, axis=0)
+    row_signal = np.sum(img, axis=1)
+    col_signal = np.sum(img, axis=0)
 
     row_peaks = find_splits(row_signal, 7)
     col_peaks = find_splits(col_signal, 9)
@@ -223,144 +169,98 @@ def get_grid_coords(grid_mask):
     # plt.plot(col_peaks, col_signal[col_peaks], "x")
     # plt.show()
 
-    return list(row_peaks), list(col_peaks)
+    return row_peaks, col_peaks
 
 
-def split_cells(image, side, row_indexes, col_indexes):
-    assert (type(image) == np.ndarray) & (len(image.shape) == 3) & np.amin(image) >= 0 & np.amax(
-        image) <= 255, 'Input data has to be RGB image'
-    assert side in ('left', 'right'), 'Side argument is string left or right'
-    assert type(row_indexes) == list, 'Row_indexes argument is list of integers'
-    assert type(col_indexes) == list, 'Cow_indexes argument is list of integers'
+def split_cells(img: np.ndarray, row_indexes: np.ndarray, col_indexes: np.ndarray):
+    """
+    Separates part of tray with identified coordinates in cells of crop growth
+    """
+    assert type(img) == np.ndarray and len(img.shape) == 3 and img.dtype == "uint8", "Input data has wrong data type"
 
-    # split_cells function separate part of tray with identified coordinates in cells of crop growth
+    areas = []
 
-    try:
+    class Area:
+        def __init__(self, row, column, cropped_area, size):
+            self.row = row
+            self.column = column
+            self.cropped_area = cropped_area
+            self.size = size
 
-        areas = []
+    for i in range(0, len(row_indexes) - 1):
+        for j in range(0, len(col_indexes) - 1):
+            cropped_area = img[row_indexes[i]:row_indexes[i + 1], col_indexes[j]:col_indexes[j + 1], :]
+            area_ = Area(i, j, cropped_area, cropped_area.shape[0:2])
+            areas.append(area_)
 
-        class area():
-
-            def __init__(self, side, row, column, cropped_area, size):
-                self.side = side
-                self.row = row
-                self.column = column
-                self.cropped_area = cropped_area
-                self.size = size
-
-        for i in range(0, len(row_indexes) - 1):
-            for j in range(0, len(col_indexes) - 1):
-                cropped_area = image[row_indexes[i]:row_indexes[i + 1], col_indexes[j]:col_indexes[j + 1], :]
-                area_ = area(side, i, j, cropped_area, cropped_area.shape[0:2])
-                areas.append(area_)
-
-        return areas
-
-    except Exception as e:
-
-        raise e
+    return areas
 
 
-def process_image(image):
-    assert (type(image) == np.ndarray) & (len(image.shape) == 3) & np.amin(image) >= 0 & np.amax(
-        image) <= 255, 'Input data has to be RGB image'
+def process_image(img):
+    """
+    Performs all previous functions/steps and returns tray area and list of crop growth cells for left and right
+    part this function also paints grid of tray with red lines for image visual result
+    """
 
-    # process_image function performs all previous functions/steps and returns tray area and list of crop growth
-    # cells for left and right part this function also paints grid of tray with red lines for image visual result
+    assert type(img) == np.ndarray and len(img.shape) == 3 and img.dtype == "uint8", "Input data has wrong data type"
 
-    try:
+    roi = crop_roi(img)
+    rows, cols = get_grid_coords(roi)
 
-        roi = crop_ROI(image)
+    if len(rows) != 7 or len(cols) != 10:
+        raise Exception('Grid structure of tray wasn\'t found')
 
-        left_part_mask = find_grid_mask(roi)
+    areas = split_cells(roi, rows, cols)
 
-        left_part_row, left_part_col = get_grid_coords(cv2.cvtColor(left_part_mask, cv2.COLOR_BGR2GRAY))
-        print(len(left_part_col), len(left_part_row))
-        if len(left_part_row) != 7 or len(left_part_col) != 10:
-            raise Exception('Grid structure of tray wasn\'t found')
+    for line in rows:
+        cv2.line(roi, (cols[0], line), (cols[-1], line), (255, 0, 0), 2)
 
-        # print(len(left_part_row), len(right_part_row),len(left_part_col),len(right_part_col))
+    for line in cols:
+        cv2.line(roi, (line, rows[0]), (line, rows[-1]), (255, 0, 0), 2)
 
-        left_part_areas = split_cells(roi, 'left', left_part_row, left_part_col)
-
-        for line in left_part_row:
-            cv2.line(roi, (left_part_col[0], line), (left_part_col[-1], line), (255, 0, 0), 2)
-
-        for line in left_part_col:
-            cv2.line(roi, (line, left_part_row[0]), (line, left_part_row[-1]), (255, 0, 0), 2)
-
-        areas = left_part_areas
-
-        return areas, roi
-
-    except Exception as e:
-
-        raise e
+    return areas, roi
 
 
-def segmentation_biomass(image, lower_thresh, upper_thresh):
-    assert (type(image) == np.ndarray) & (len(image.shape) == 3) & np.amin(image) >= 0 & np.amax(
-        image) <= 255, 'Input data has to be RGB image'
+def segmentation_biomass(img, lower_thresh, upper_thresh):
+    """
+    Segments crop in given area with predefined thresholds in HSV color space and returns biomass
+    """
+    assert type(img) == np.ndarray and len(img.shape) == 3 and img.dtype == "uint8", "Input data has wrong data type"
 
-    # segmentation_biomass function segment crop in given area with predefined thresholds in HSV color space
+    h, w = img.shape[:2]
+    hsv = cv2.cvtColor(img.copy(), cv2.COLOR_BGR2HSV)
 
-    try:
+    mask = cv2.inRange(hsv, lower_thresh, upper_thresh)
+    mask = (mask > 0).astype('uint8')
 
-        h, w = image.shape[0:2]
-
-        hsv = cv2.cvtColor(image.copy(), cv2.COLOR_BGR2HSV)
-
-        mask = cv2.inRange(hsv, lower_thresh, upper_thresh)
-        mask = (mask > 0).astype('uint8')
-
-        biomass = mask.sum() / (h * w)
-
-        return biomass
-
-    except Exception as e:
-
-        raise e
+    return mask.sum() / (h * w)
 
 
-def paint_active_biomass(image, lower_thresh, upper_thresh):
-    assert (type(image) == np.ndarray) & (len(image.shape) == 3) & np.amin(image) >= 0 & np.amax(
-        image) <= 255, 'Input data has to be RGB image'
+def paint_active_biomass(img, lower_thresh, upper_thresh):
+    """
+    Draws contours around active crop biomass in a whole image
+    """
+    assert type(img) == np.ndarray and len(img.shape) == 3 and img.dtype == "uint8", "Input data has wrong data type"
 
-    # paint_active_biomass function draw contours around active crop biomass in a whole image
+    hsv = cv2.cvtColor(img.copy(), cv2.COLOR_BGR2HSV)
 
-    try:
+    mask = cv2.inRange(hsv, lower_thresh, upper_thresh)
+    mask = (mask > 0).astype('uint8') * 255
+    mask = cv2.Canny(mask, 100, 200)
 
-        hsv = cv2.cvtColor(image.copy(), cv2.COLOR_BGR2HSV)
+    cnts, __ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-        mask = cv2.inRange(hsv, lower_thresh, upper_thresh)
-        mask = (mask > 0).astype('uint8') * 255
-        mask = cv2.Canny(mask, 100, 200)
+    cv2.drawContours(img, cnts, -1, (0, 0, 255), 1)
 
-        cnts, __ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        cv2.drawContours(image, cnts, -1, (0, 0, 255), 1)
-
-        return image
-
-    except Exception as e:
-
-        raise e
+    return img
 
 
-def filename_parser(file):
-    assert type(file) == str, 'Argument of function has to be string'
-
-    # filename_parser function parse important data from image filename
-
-    try:
-
-        info = file.split('.')[0].split('_')
-
-        return {'variant': info[0], 'date': info[2], 'time': info[4]}
-
-    except Exception as e:
-
-        raise
+def filename_parser(file: str) -> dict:
+    """
+    Parses important data from image filename
+    """
+    info = file.split('.')[0].split('_')
+    return {'variant': info[0], 'date': info[2], 'time': info[4]}
 
 
 def chunk(l, n):
@@ -370,27 +270,26 @@ def chunk(l, n):
         yield l[i: i + n]
 
 
-def process_images(imageLoad):
-    print("[INFO] Starting process {}".format(imageLoad["id"]))
-    print("[INFO] For process {}, there is {} images in processing queue".format(imageLoad["id"],
-                                                                                 len(imageLoad["files_names"])))
+def process_images(img):
+    print("[INFO] Starting process {}".format(img["id"]))
+    print("[INFO] For process {}, there is {} images in processing queue".format(img["id"],
+                                                                                 len(img["files_names"])))
 
-    f = open(imageLoad["temp_path"] + "failures_{}.txt".format(imageLoad["id"]), "w+")
+    f = open(img["temp_path"] + "failures_{}.txt".format(img["id"]), "w+")
     final_data = []
 
-    for imageName in imageLoad["files_names"]:
-
+    for imageName in img["files_names"]:
         try:
 
             metadata = filename_parser(imageName)
 
-            image = cv2.imread(imageLoad["input_path"] + imageName)
+            image = cv2.imread(img["input_path"] + imageName)
 
             areas, roi = process_image(image)
 
             contoured_roi = paint_active_biomass(roi, selgen_global.lower_thresh, selgen_global.upper_thresh)
 
-            cv2.imwrite(imageLoad["output_path"] + imageName, contoured_roi)
+            cv2.imwrite(img["output_path"] + imageName, contoured_roi)
 
             image_data = []
 
@@ -399,26 +298,24 @@ def process_images(imageLoad):
                                                selgen_global.upper_thresh)
 
                 image_data.append(
-                    dict(zip(('filename', 'date', 'time', 'variant', 'side', 'row', 'column', 'biomass', 'size'),
-                             (imageName, metadata['date'], metadata['time'], metadata['variant'], area.side, area.row,
+                    dict(zip(('filename', 'date', 'time', 'variant', 'row', 'column', 'biomass', 'size'),
+                             (imageName, metadata['date'], metadata['time'], metadata['variant'], area.row,
                               area.column, biomass, area.size))))
 
             final_data = final_data + image_data
 
         except Exception as e:
             exception_type, exception_object, exception_traceback = sys.exc_info()
-
             filename = exception_traceback.tb_frame.f_code.co_filename
-
             line_number = exception_traceback.tb_lineno
 
             print('{} - {}: {}'.format(filename, line_number, exception_object))
             f.write('{} - {}: {}\n'.format(filename, line_number, exception_object))
 
         df = pd.DataFrame(final_data)
-        df = df[['filename', 'date', 'time', 'variant', 'side', 'row', 'column', 'biomass', 'size']]
-        df.sort_values(by=['side', 'row', 'column', 'date', 'time'])
-        df.to_excel(imageLoad["temp_path"] + '/batch_result_{}.xlsx'.format(imageLoad["id"]))
+        df = df[['filename', 'date', 'time', 'variant', 'row', 'column', 'biomass', 'size']]
+        df.sort_values(by=['row', 'column', 'date', 'time'])
+        df.to_excel(img["temp_path"] + '/batch_result_{}.xlsx'.format(img["id"]))
 
 
 if __name__ == '__main__':
@@ -434,8 +331,8 @@ if __name__ == '__main__':
     if not os.path.exists(temp_path):
         os.makedirs(temp_path)
 
-    formats = ('.JPG', '.jpg', '.PNG', '.png', '.bmp', '.BMP', '.TIFF', '.tiff', '.TIF', '.tif')
-    files = [file for file in os.listdir(selgen_global.path) if file.endswith(formats)]
+    FORMATS = ('.JPG', '.jpg', '.PNG', '.png', '.bmp', '.BMP', '.TIFF', '.tiff', '.TIF', '.tif')
+    files = [file for file in os.listdir(selgen_global.path) if file.endswith(FORMATS)]
     data = []
 
     procs = cpu_count()
@@ -486,9 +383,8 @@ if __name__ == '__main__':
         frames.append(pd.read_excel(temp_path + xlsx, engine='openpyxl'))
 
     structured_result = pd.concat(frames, ignore_index=True)
-    structured_result = structured_result[
-        ['filename', 'date', 'time', 'variant', 'side', 'row', 'column', 'biomass', 'size']]
-    structured_result.sort_values(by=['side', 'row', 'column', 'date', 'time'])
+    structured_result = structured_result[['filename', 'date', 'time', 'variant', 'row', 'column', 'biomass', 'size']]
+    structured_result.sort_values(by=['row', 'column', 'date', 'time'])
     structured_result.to_excel(output_path + 'exp_result.xlsx', index=False)
 
     with open(output_path + 'failures.txt', 'w') as outfile:
