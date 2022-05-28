@@ -3,7 +3,7 @@ import cv2
 import numpy as np
 import scipy.ndimage
 import scipy.io
-from scipy.signal import argrelmax
+from scipy.signal import argrelmax, find_peaks
 from scipy.optimize import curve_fit
 import os, sys
 import selgen_global
@@ -22,7 +22,7 @@ def crop_ROI(image):
         b,g,r = cv2.split(image)
 
         #columns
-        col_mask = b < 100
+        col_mask = b < 150
         col_mask[:,col_mask.shape[1]//2 - 500:col_mask.shape[1]//2 + 500] = 1
 
         proj = np.sum(col_mask, axis = 0)
@@ -45,7 +45,7 @@ def crop_ROI(image):
 
         #rows
 
-        row_mask = b < 100
+        row_mask = b < 150
 
         proj = np.sum(row_mask,axis = 1)
         mez = max(proj)/3
@@ -108,53 +108,25 @@ def half_split(image):
         
         raise e
 
-def find_grid_mask(image, etalon_path, side):
+def find_grid_mask(roi):
 
-    assert (type(image) == np.ndarray) & (len(image.shape) == 3) & np.amin(image) >= 0 & np.amax(image) <= 255, 'Input data has to be RGB image'
-    assert (type(etalon_path) == str) and (os.path.exists(etalon_path)), 'Path to bucket storage credentials json file is not valid'
+    assert (type(roi) == np.ndarray) & (len(roi.shape) == 3) & np.amin(roi) >= 0 & np.amax(roi) <= 255, 'Input data has to be RGB image'
 
-    #find_grid_mask function identifies grid on given part of tray
-    #computation of grid with scipy.ndimage.correlate is most demanding part of image analysis
+    h, w = roi.shape[:2]
 
-    try:
+    (cX, cY) = (w // 2, h // 2)
 
-        pattern = scipy.io.loadmat(etalon_path)
+    opt_angle = find_opt_rotation(roi)
 
-        cross_pattern = pattern['krizek']
+    M = cv2.getRotationMatrix2D((cX, cY), opt_angle, 1.0)
+    roi = cv2.warpAffine(roi, M, (w, h))
 
-        image[0:50,:,:] = 0
-        image[image.shape[0]-50:image.shape[0],:,:] = 0
-        
-        if(side == 'right'):
-            
-            image[:,image.shape[1]-50:image.shape[1],:] = 0
-            
-        if(side == 'left'):
-            
-            image[:,0:50,:] = 0
-        
-        hsv = cv2.cvtColor(image.copy(), cv2.COLOR_BGR2HSV)
-        
-        lower = np.array([60,0,50])
-        upper = np.array([140,100,155])
-
-        background_mask = cv2.inRange(hsv, lower, upper)
-        background_mask = (background_mask>0).astype('uint8')
-        
-        grayscale_ROI = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        ret, ROI_thresholded = cv2.threshold(grayscale_ROI,0,255,cv2.THRESH_BINARY+cv2.THRESH_OTSU)
-        grid_mask = scipy.ndimage.correlate(ROI_thresholded, cross_pattern, mode='nearest')
-        
-        return grid_mask * background_mask
-
-    except Exception as e:
-
-        raise e
+    return roi
 
 
 def find_opt_rotation(mask: np.ndarray):
 
-    (h, w) = mask.shape
+    (h, w) = mask.shape[:2]
     (cX, cY) = (w // 2, h // 2)
 
     Crit = []
@@ -193,102 +165,66 @@ def nufit_fourier(x, y):
 
     return fitfunc(x)
 
-def get_grid_coords(grid_mask, side):
 
-    #get_grid_coords identify coordinates of grid on given part of tray with grid mask
+def find_splits(signal, COUNT):
+    def square_function(xo, frequency, duty, offset):
+        xo = xo + offset
+        period = len(signal) / frequency
+        return (xo % period > period * duty) * np.max(signal) * 0.6
+
+    def moving_average(x, w):
+        return np.convolve(x, np.ones(w), 'same') / w
+
+    signal = signal - moving_average(signal, len(signal) // 10)
+    signal -= signal.mean()
+
+    x = np.linspace(0, len(signal), len(signal))
+    offsets = []
+    for offset in np.linspace(-len(x) // COUNT // 2, len(x) // COUNT // 2 + 1, 100):
+        for frequency in np.linspace(COUNT, COUNT + 1, 10):
+            for duty in [0.8]:
+                y = square_function(x, frequency, duty, offset)
+                error = np.square(np.subtract(y, signal)).mean()
+                offsets.append((frequency, duty, offset, error))
+
+    frequency, duty, offset, error = min(offsets, key=lambda z: z[-1])
+
+    diff = np.diff(square_function(x, frequency, duty, offset))
+    diff_tc = np.abs(diff)
+
+    peaks, _ = find_peaks(diff)
+    peaks_tc, _ = find_peaks(diff_tc)
+
+    peaks_n = peaks + np.min(np.unique(np.diff(peaks_tc))) // 2
+
+    for n, peak in enumerate(peaks_n):
+        if peak >= len(signal) - 1:
+            peaks_n[n] = len(signal) - 1
+
+    return peaks_n
+
+
+def get_grid_coords(grid_mask):
+    # get_grid_coords identify coordinates of grid on given part of tray with grid mask
         
     assert (type(grid_mask) == np.ndarray) & (len(grid_mask.shape) == 2) & np.amin(grid_mask) >= 0 & np.amax(grid_mask) <= 255, 'Input data has to be RGB image'
-    assert side in ('left','right'), 'Side argument is string left or right'
 
-    try:
+    # Compute signal for rows and columns
+    row_signal = np.sum(grid_mask, axis=1)
+    col_signal = np.sum(grid_mask, axis=0)
 
-        #Find optimal grid rotation and rotate grid
-        h,w = grid_mask.shape
+    row_peaks = find_splits(row_signal, 7)
+    col_peaks = find_splits(col_signal, 9)
 
-        grid_mask[0:150,:] = 0
-        grid_mask[h-150:h,:] = 0
+    # plt.plot(row_signal)
+    # plt.plot(row_peaks, row_signal[row_peaks], "x")
+    # plt.show()
 
-        if(side == 'left'):
+    # plt.plot(col_signal)
+    # plt.plot(col_peaks, col_signal[col_peaks], "x")
+    # plt.show()
 
-            grid_mask[:,0:200] = 0
-            grid_mask[:,w-100:w] = 0
-
-        if(side == 'right'):
-
-            grid_mask[:,0:100] = 0
-            grid_mask[:,w-200:w] = 0
-
-        (cX, cY) = (w // 2, h // 2)
-
-        opt_angle = find_opt_rotation(grid_mask)
-
-        M = cv2.getRotationMatrix2D((cX, cY), opt_angle, 1.0)
-        grid_mask = cv2.warpAffine(grid_mask, M, (w, h))
-
-        #Compute signal for rows and columns
-        row_idx = [] 
-        row_signal = []
-
-        for i in range(0,grid_mask.shape[0]):
-
-            row_signal.append(np.sum(grid_mask[i,:]))
-            row_idx.append(i)
-
-        row_idx = np.array(row_idx)
-        row_signal = np.array(row_signal)
-
-        col_idx = [] 
-        col_signal = []
-
-        for j in range(0,grid_mask.shape[1]):
-
-            col_signal.append(np.sum(grid_mask[:,j]))
-            col_idx.append(j)
-
-        col_idx = np.array(col_idx)
-        col_signal = np.array(col_signal)
-
-        #Using fourier tranform find grid indexes
-        row_fit = nufit_fourier(row_idx, row_signal)
-        row_indexes = list(argrelmax(row_fit)[0])
-
-        col_fit = nufit_fourier(col_idx, col_signal)
-        col_indexes = list(argrelmax(col_fit)[0])
-
-        if len(col_indexes) != 9:
-
-            index_energy = []
-
-            for index in col_indexes: 
-                
-                indexes = np.arange(index-30,index+30)
-                index_energy.append(col_signal[list(indexes[(indexes > 0) & (indexes < w)])].sum())
-
-            if len(col_indexes) < 9:
-
-                if index_energy[0] != 0: col_indexes = [int(np.max([0,col_indexes[0] - np.median(np.diff(col_indexes))]))] + col_indexes
-                elif index_energy[-1] != 0: col_indexes = col_indexes + [int(np.min([w,col_indexes[-1] + np.median(np.diff(col_indexes))]))]
-
-            elif len(col_indexes) > 9:
-
-                if side == 'left': col_indexes = col_indexes[-9:]
-                elif side == 'right': col_indexes = col_indexes[:9]
-
-        row_indexes.sort()
-        col_indexes.sort() 
-
-        roww_indexes = []
-
-        for l in range (0,len(row_indexes),2):
-
-            roww_indexes.append(row_indexes[l])
-        
-        return roww_indexes,col_indexes
-
-    except Exception as e:
-
-        raise e
-
+    return list(row_peaks), list(col_peaks)
 
 def split_cells(image, side, row_indexes, col_indexes):
     
@@ -339,21 +275,16 @@ def process_image(image):
 
         roi = crop_ROI(image)
         
-        left_part, right_part, index = half_split(roi)
-        
-        left_part_mask = find_grid_mask(left_part, selgen_global.etalon_path, 'left')
-        right_part_mask = find_grid_mask(right_part, selgen_global.etalon_path, 'right')
+        left_part_mask = find_grid_mask(roi)
 
-        left_part_row, left_part_col = get_grid_coords(left_part_mask, 'left')
-        right_part_row, right_part_col = get_grid_coords(right_part_mask, 'right')
-
-        if (len(left_part_row) != 6) | (len(right_part_row) != 6) | (len(left_part_col) != 9) | (len(right_part_col) != 9): 
+        left_part_row, left_part_col = get_grid_coords(cv2.cvtColor(left_part_mask, cv2.COLOR_BGR2GRAY))
+        print(len(left_part_col), len(left_part_row))
+        if len(left_part_row) != 7 or len(left_part_col) != 10:
             raise Exception('Grid structure of tray wasn\'t found')
 
         #print(len(left_part_row), len(right_part_row),len(left_part_col),len(right_part_col))
 
-        left_part_areas = split_cells(left_part,'left', left_part_row, left_part_col)
-        right_part_areas = split_cells(right_part,'right', right_part_row, right_part_col)    
+        left_part_areas = split_cells(roi,'left', left_part_row, left_part_col)
 
         for line in left_part_row:
 
@@ -363,17 +294,8 @@ def process_image(image):
 
             cv2.line(roi, (line, left_part_row[0]), (line, left_part_row[-1]), (255,0,0), 2)
 
-        for line in right_part_row:
 
-            cv2.line(roi, (right_part_col[0]+index, line), (right_part_col[-1]+index, line), (255,0,0), 2)
-
-        for line in right_part_col:
-
-            line = line + index
-            cv2.line(roi, (line, right_part_row[0]), (line, right_part_row[-1]), (255,0,0), 2)
-        
-
-        areas = left_part_areas + right_part_areas
+        areas = left_part_areas
         
         return areas, roi
 
@@ -491,6 +413,8 @@ def process_images(imageLoad):
            
         except Exception as e:
 
+            raise e
+
             exception_type, exception_object, exception_traceback = sys.exc_info()
 
             filename = exception_traceback.tb_frame.f_code.co_filename
@@ -498,8 +422,7 @@ def process_images(imageLoad):
             line_number = exception_traceback.tb_lineno
         
             print('{} - {}: {}'.format(filename, line_number, exception_object))
-            
-            f.write('{},{filename},{line_numbe},{exception_tracebac}'.format(imageName) + '\n')
+            f.write('{} - {}: {}\n'.format(filename, line_number, exception_object))
     
         df = pd.DataFrame(final_data)
         df = df[['filename','date','time','variant','side','row', 'column','biomass', 'size']]
