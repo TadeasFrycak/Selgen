@@ -5,6 +5,8 @@ import selgen_global
 import pandas as pd
 import numpy as np
 import cv2
+import traceback
+
 import sys
 import os
 
@@ -83,62 +85,6 @@ def find_opt_rotation(mask: np.ndarray):
     return angle[np.argmax(crit)]
 
 
-def find_splits(signal, COUNT):
-    # TODO simplify
-    def square_function(xo, frequency, duty, offset):
-        xo = xo + offset
-        period = len(signal) / frequency
-        return (xo % period > period * duty) * np.max(signal) * 0.6
-
-    def moving_average(x, w):
-        return np.convolve(x, np.ones(w), 'same') / w
-
-    signal = signal - moving_average(signal, len(signal) // 10)
-    signal -= signal.mean()
-
-    x = np.linspace(0, len(signal), len(signal))
-    offsets = []
-    for offset in np.linspace(-len(x) // COUNT // 2, len(x) // COUNT // 2 + 1, 100):
-        for frequency in np.linspace(COUNT, COUNT + 1, 10):
-            for duty in [0.8]:
-                y = square_function(x, frequency, duty, offset)
-                error = np.square(np.subtract(y, signal)).mean()
-                offsets.append((frequency, duty, offset, error))
-
-    frequency, duty, offset, error = min(offsets, key=lambda z: z[-1])
-
-    diff = np.diff(square_function(x, frequency, duty, offset))
-    diff_tc = np.abs(diff)
-
-    peaks, _ = find_peaks(diff)
-    peaks_tc, _ = find_peaks(diff_tc)
-
-    peaks_n = peaks + np.min(np.unique(np.diff(peaks_tc))) // 2
-
-    for n, peak in enumerate(peaks_n):
-        if peak >= len(signal) - 1:
-            peaks_n[n] = len(signal) - 1
-
-    # freq = np.fft.fftfreq(len(x), (x[1] - x[0]))  # assume uniform spacing
-    # Fy = abs(np.fft.fft(y))
-    #
-    # guess_freq = abs(freq[np.argmax(Fy[1:]) + 1])  # excluding the zero frequency "peak", which is related to offset
-    # guess_amp = np.std(y) * 2. ** 0.5
-    # guess_offset = np.mean(y)
-    # guess = np.array([guess_amp, 2. * np.pi * guess_freq, 0., guess_offset])
-    #
-    # def sinfunc(t, A, w, p, c):
-    #     return A * np.sin(w * t + p) + c
-    #
-    # popt, pcov = curve_fit(sinfunc, x, y, p0=guess, maxfev=10000)
-    # A, w, p, c = popt
-    # fitfunc = lambda t: A * np.sin(w * t + p) + c
-    #
-    # return fitfunc(x)
-
-    return peaks_n
-
-
 def get_grid_coords(img: np.ndarray):
     """
     Identifies coordinates of grid on given part of tray with grid mask
@@ -158,8 +104,8 @@ def get_grid_coords(img: np.ndarray):
     row_signal = np.sum(img, axis=1)
     col_signal = np.sum(img, axis=0)
 
-    row_peaks = find_splits(row_signal, 7)
-    col_peaks = find_splits(col_signal, 9)
+    row_peaks = np.linspace(80, len(row_signal)-80, 7).astype(int)
+    col_peaks = np.linspace(60, len(col_signal)-60, 10).astype(int)
 
     # plt.plot(row_signal)
     # plt.plot(row_peaks, row_signal[row_peaks], "x")
@@ -208,7 +154,7 @@ def process_image(img):
     rows, cols = get_grid_coords(roi)
 
     if len(rows) != 7 or len(cols) != 10:
-        raise Exception('Grid structure of tray wasn\'t found')
+        raise Exception(f'Grid structure of tray wasn\'t found (rows: {len(rows)}!=7 or cols: {len(cols)}!=10)')
 
     areas = split_cells(roi, rows, cols)
 
@@ -308,6 +254,9 @@ def process_images(img):
             exception_type, exception_object, exception_traceback = sys.exc_info()
             filename = exception_traceback.tb_frame.f_code.co_filename
             line_number = exception_traceback.tb_lineno
+            
+            traceback.print_exc()
+
 
             print('{} - {}: {}'.format(filename, line_number, exception_object))
             f.write('{} - {}: {}\n'.format(filename, line_number, exception_object))
